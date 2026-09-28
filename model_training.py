@@ -7,7 +7,7 @@ import seaborn as sns
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import GradientBoostingClassifier 
 from sklearn.decomposition import TruncatedSVD
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.metrics import accuracy_score, classification_report, roc_auc_score, roc_curve
 
 plt.style.use('seaborn-v0_8-whitegrid' if 'seaborn-v0_8-whitegrid' in plt.style.available else 'default')
 plt.rcParams.update({'font.size': 10, 'figure.titlesize': 12})
@@ -16,7 +16,10 @@ output_dir = "ai_visualizations"
 os.makedirs(output_dir, exist_ok=True)
 
 print("🔌 [DATABASE] Connecting to local DuckDB storage...")
-con = duckdb.connect("/Users/ciaranguyen/Documents/ecom_project/dev.duckdb")
+DB_PATH = os.environ.get("DUCKDB_PATH", "/Users/ciaranguyen/Documents/ecom_project/dev.duckdb")
+CHURN_WINDOW_DAYS = 180
+
+con = duckdb.connect(DB_PATH)
 print("✅ [DATABASE] Connection established successfully.\n")
 
 print("" + "="*70)
@@ -30,32 +33,67 @@ print("🧠 [MODULE 1] Training Churn Prediction Model...")
 df_rfm = con.execute("SELECT * FROM main.analytics_rfm").df()
 print(f"   ↳ Loaded {len(df_rfm):,} customer profiles from 'analytics_rfm'.")
 
-df_rfm['is_churned'] = np.where((df_rfm['recency'] > 300) | (df_rfm['Segment'].isin(['At Risk', 'Lost'])), 1, 0)
+# Churn is defined on future behaviour to avoid label leakage: RFM features are
+# computed as of a cutoff date, and a customer is churned if they place no order
+# in the CHURN_WINDOW_DAYS that follow it.
+df_orders = con.execute("""
+    SELECT
+        c.customer_unique_id,
+        m.order_id,
+        MIN(m.purchase_at) as purchase_at,
+        SUM(m.total_amount_paid) as amount
+    FROM main.marts m
+    JOIN read_csv_auto('data/raw/olist_customers_dataset.csv') c ON m.customer_id = c.customer_id
+    WHERE m.order_status = 'delivered'
+    GROUP BY ALL
+""").df()
 
-X = df_rfm[['recency', 'frequency', 'monetary']]
-y = df_rfm['is_churned']
+def rfm_features(orders, reference_date):
+    feats = orders.groupby('customer_unique_id').agg(
+        last_purchase=('purchase_at', 'max'),
+        frequency=('order_id', 'nunique'),
+        monetary=('amount', 'sum'),
+    )
+    feats['recency'] = (reference_date - feats['last_purchase']).dt.days
+    return feats[['recency', 'frequency', 'monetary']]
 
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+snapshot_date = df_orders['purchase_at'].max()
+cutoff_date = snapshot_date - pd.Timedelta(days=CHURN_WINDOW_DAYS)
+
+df_train = rfm_features(df_orders[df_orders['purchase_at'] < cutoff_date], cutoff_date)
+returned = df_orders.loc[df_orders['purchase_at'] >= cutoff_date, 'customer_unique_id'].unique()
+df_train['is_churned'] = (~df_train.index.isin(returned)).astype(int)
+print(f"   ↳ Cutoff {cutoff_date:%Y-%m-%d}: {len(df_train):,} customers, "
+      f"{df_train['is_churned'].mean():.1%} did not return within {CHURN_WINDOW_DAYS} days.")
+
+X = df_train[['recency', 'frequency', 'monetary']]
+y = df_train['is_churned']
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
 
 model_churn = GradientBoostingClassifier(n_estimators=50, random_state=42)
 model_churn.fit(X_train, y_train)
 
+# Classes are heavily imbalanced, so ROC-AUC is the headline metric rather than accuracy
 y_pred = model_churn.predict(X_test)
-acc = accuracy_score(y_test, y_pred)
-print(f"   ⭐ [EVALUATION] Model Accuracy Score: {acc:.2%}")
+y_proba = model_churn.predict_proba(X_test)[:, 1]
+auc = roc_auc_score(y_test, y_proba)
+print(f"   ⭐ [EVALUATION] ROC-AUC: {auc:.3f} | Accuracy: {accuracy_score(y_test, y_pred):.2%} "
+      f"(baseline 'always churned': {y_test.mean():.2%})")
 print("   ⭐ [METRICS] Classification Report under Terminal:")
-print(classification_report(y_test, y_pred, target_names=['Active', 'Churned']))
+print(classification_report(y_test, y_pred, target_names=['Returned', 'Churned'], zero_division=0))
 
-# 📊 VISUALIZATION 1: Confusion Matrix & Feature Importance
-print("   ↳ Generating Matrix and Feature Importance plots...")
+# 📊 VISUALIZATION 1: ROC Curve & Feature Importance
+print("   ↳ Generating ROC curve and Feature Importance plots...")
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
 
-cm = confusion_matrix(y_test, y_pred)
-sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", ax=ax1, 
-            xticklabels=['Active', 'Churned'], yticklabels=['Active', 'Churned'])
-ax1.set_title("Confusion Matrix (Model Validation)")
-ax1.set_xlabel("Predicted Label")
-ax1.set_ylabel("True Label")
+fpr, tpr, _ = roc_curve(y_test, y_proba)
+ax1.plot(fpr, tpr, color='#6366f1', label=f"GradientBoosting (AUC = {auc:.3f})")
+ax1.plot([0, 1], [0, 1], linestyle='--', color='#94a3b8', label="Random")
+ax1.set_title("ROC Curve (Model Validation)")
+ax1.set_xlabel("False Positive Rate")
+ax1.set_ylabel("True Positive Rate")
+ax1.legend(loc='lower right')
 
 importances = model_churn.feature_importances_
 indices = np.argsort(importances)
@@ -70,8 +108,13 @@ fig.savefig(f"{output_dir}/module1_churn_evaluation.png", dpi=300)
 plt.close()
 print(f"   📸 [SAVED] Plot exported to '{output_dir}/module1_churn_evaluation.png'")
 
+# Score every customer on their full history as of the snapshot date
 model_churn.fit(X, y)
-df_rfm['churn_risk_probability'] = model_churn.predict_proba(X)[:, 1]
+df_current = rfm_features(df_orders, snapshot_date)
+df_current['churn_risk_probability'] = model_churn.predict_proba(df_current[['recency', 'frequency', 'monetary']])[:, 1]
+df_rfm = df_rfm.drop(columns=['is_churned', 'churn_risk_probability'], errors='ignore').merge(
+    df_current[['churn_risk_probability']], left_on='customer_unique_id', right_index=True, how='left'
+)
 
 avg_churn_risk = df_rfm['churn_risk_probability'].mean()
 print(f"   ↳ Average Churn Risk Across Customer Base: {avg_churn_risk:.1%}")
@@ -149,8 +192,12 @@ df_marts_raw = con.execute("""
         m.*, 
         COALESCE(r.review_score, 5) as review_score
     FROM main.marts m
-    LEFT JOIN read_csv_auto('data/raw/olist_order_reviews_dataset.csv') r 
-        ON m.order_id = r.order_id
+    LEFT JOIN (
+        -- Some orders have several reviews; keep the latest so the join does not duplicate rows
+        SELECT order_id, review_score
+        FROM read_csv_auto('data/raw/olist_order_reviews_dataset.csv')
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY review_answer_timestamp DESC) = 1
+    ) r ON m.order_id = r.order_id
 """).df()
 print(f"   ↳ Processing sentiment states for {len(df_marts_raw):,} e-commerce transactions.")
 

@@ -37,8 +37,12 @@ order_metrics AS (
         order_id, customer_id, order_status, purchase_at, product_category, customer_delivered_at, estimated_at
 )
 
-SELECT 
+-- Grain is order x category, so the order-level payment is allocated to each
+-- category row by its share of item price (orders without items keep the full amount)
+SELECT
     m.*,
-    COALESCE(p.total_amount_paid, 0) as total_amount_paid
+    COALESCE(p.total_amount_paid, 0)
+        * COALESCE(m.total_item_price / NULLIF(SUM(m.total_item_price) OVER (PARTITION BY m.order_id), 0), 1)
+        as total_amount_paid
 FROM order_metrics m
 LEFT JOIN order_payments_aggregated p ON m.order_id = p.order_id

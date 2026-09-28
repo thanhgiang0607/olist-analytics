@@ -95,9 +95,10 @@ The platform is powered by an automated machine learning pipeline (`model_traini
 
 ### 1. AI Churn Prediction
 - **Algorithm:** `GradientBoostingClassifier`
-- **Features:** RFM metrics (Recency, Frequency, Monetary).
-- **Outcome:** Calculates churn risk probability for every customer.
-- **Business Value:** Enables proactive retention campaigns for "At-Risk" segments.
+- **Features:** RFM metrics (Recency, Frequency, Monetary) computed as of a cutoff date.
+- **Label:** A customer is churned if they place no order in the 180 days after the cutoff (future behaviour, so the label does not leak from the features).
+- **Result:** ~98.8% of customers never return and ROC-AUC is ~0.55 — repurchase is essentially unpredictable from RFM. Adding delivery, delay, review, payment, state and category features did not improve it (AUC ~0.54).
+- **Business Value:** The model's main finding is structural: Olist has no repeat-purchase signal to target, so retention requires product/loyalty changes rather than predictive targeting.
 
 ### 2. Product Recommendation Engine
 - **Methodology:** Latent Factor Modeling via `TruncatedSVD` (Matrix Factorization).
