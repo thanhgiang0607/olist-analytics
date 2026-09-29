@@ -545,7 +545,7 @@ def chart_card(title: str, fig, height=300, margin=None, extra_layout=None):
     apply_theme(fig, height=height, margin=margin)
     if extra_layout:
         fig.update_layout(**extra_layout)
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
     st.markdown("</div>", unsafe_allow_html=True)
 
 
@@ -629,6 +629,21 @@ def load_data():
 
 df_marts, df_rfm_raw, df_recs = load_data()
 
+# The model's probabilities are squeezed into a narrow band (~98–99%), so rank
+# customers against the whole scored base to get a risk tier that separates them.
+df_rfm_raw["churn_percentile"] = df_rfm_raw["churn_risk_probability"].rank(pct=True)
+
+def risk_tier(pct):
+    if pd.isna(pct):
+        return "Not scored"
+    if pct >= 0.8:
+        return "High"
+    if pct >= 0.4:
+        return "Medium"
+    return "Low"
+
+RISK_COLORS = {"High": "#f87171", "Medium": "#fb923c", "Low": "#5eead4", "Not scored": "#64748b"}
+
 
 # ══════════════════════════════════════════
 # 6. SIDEBAR
@@ -664,8 +679,14 @@ with st.sidebar:
         Product Category
     </div>""", unsafe_allow_html=True)
     available_cats = sorted(df_marts["product_category"].dropna().unique())
-    selected_cats  = st.multiselect("cat", available_cats, default=available_cats[:5],
-                                    label_visibility="collapsed")
+    use_all_cats = st.toggle("All categories", value=False)
+    if use_all_cats:
+        selected_cats = available_cats
+        st.caption(f"{len(available_cats)} categories selected")
+    else:
+        selected_cats = st.multiselect("cat", available_cats, default=available_cats[:5],
+                                       label_visibility="collapsed",
+                                       placeholder="Choose categories…")
 
     st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
 
@@ -713,6 +734,10 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
+if not selected_cats:
+    st.info("👈 Chọn ít nhất một product category ở sidebar (hoặc bật **All categories**) để xem dashboard.")
+    st.stop()
+
 df_f = df_marts[df_marts["product_category"].isin(selected_cats)]
 
 # Recalculate RFM and Cohort based on filtered data
@@ -720,8 +745,11 @@ with st.spinner("Recalculating segments..."):
     df_rfm = get_rfm_data(df_f, df_marts["purchase_at"].max())
     if not df_rfm.empty:
         # Join churn risk from original model if available
-        df_rfm = df_rfm.merge(df_rfm_raw[["customer_unique_id", "churn_risk_probability"]], 
-                               on="customer_unique_id", how="left")
+        # Customers whose orders were never delivered aren't scored by the model -> NaN
+        df_rfm = df_rfm.merge(
+            df_rfm_raw[["customer_unique_id", "churn_risk_probability", "churn_percentile"]],
+            on="customer_unique_id", how="left")
+        df_rfm["Risk Tier"] = df_rfm["churn_percentile"].apply(risk_tier)
     
     df_cohort = get_cohort_data(df_f)
 
@@ -802,13 +830,22 @@ with tab1:
 
     # ── KPI Row ──────────────────────────
     k1, k2, k3, k4 = st.columns(4)
+    rev_share   = df_f["total_amount_paid"].sum() / df_marts["total_amount_paid"].sum()
+    order_share = df_f["order_id"].nunique() / df_marts["order_id"].nunique()
+    freight_vs  = df_f["total_shipping_cost"].mean() / df_marts["total_shipping_cost"].mean() - 1
+    deliv_vs    = df_f["actual_delivery_days"].mean() / df_marts["actual_delivery_days"].mean() - 1
+    # (col, class, label, value, icon, bar fill 0–1, caption under the bar)
     kpi_data = [
-        (k1, "k-teal",   "Total Revenue",       f"${df_f['total_amount_paid'].sum():,.0f}",    "💰"),
-        (k2, "k-indigo", "Order Volume",         f"{df_f['order_id'].nunique():,}",             "📦"),
-        (k3, "k-orange", "Avg Freight",          f"${df_f['total_shipping_cost'].mean():,.2f}", "🚚"),
-        (k4, "k-pink",   "Fulfillment Time",     f"{df_f['actual_delivery_days'].mean():.1f}d", "⏱"),
+        (k1, "k-teal",   "Total Revenue",    f"${df_f['total_amount_paid'].sum():,.0f}",    "💰",
+         rev_share,   f"{rev_share:.1%} of total revenue"),
+        (k2, "k-indigo", "Order Volume",     f"{df_f['order_id'].nunique():,}",             "📦",
+         order_share, f"{order_share:.1%} of all orders"),
+        (k3, "k-orange", "Avg Freight",      f"${df_f['total_shipping_cost'].mean():,.2f}", "🚚",
+         min(max(0.5 + freight_vs, 0), 1), f"{freight_vs:+.1%} vs overall avg"),
+        (k4, "k-pink",   "Fulfillment Time", f"{df_f['actual_delivery_days'].mean():.1f}d", "⏱",
+         min(max(0.5 + deliv_vs, 0), 1),   f"{deliv_vs:+.1%} vs overall avg"),
     ]
-    for col, cls, label, val, icon in kpi_data:
+    for col, cls, label, val, icon, fill, caption in kpi_data:
         with col:
             accent_color, accent_bg = KPI_ACCENTS[cls]
             st.markdown(f"""
@@ -822,9 +859,11 @@ with tab1:
               <div style="font-family:'JetBrains Mono',monospace;font-size:22px;font-weight:700;
                   color:{T['text_primary']};letter-spacing:-0.5px;line-height:1">{val}</div>
               <div style="margin-top:10px;height:3px;background:{T['border']};border-radius:2px;overflow:hidden">
-                <div style="height:100%;width:72%;background:linear-gradient(90deg,{accent_color},rgba({T['accent_rgb']},0.3));
+                <div style="height:100%;width:{fill:.0%};background:linear-gradient(90deg,{accent_color},rgba({T['accent_rgb']},0.3));
                     border-radius:2px;animation:bar-grow 0.8s ease both;transform-origin:left"></div>
               </div>
+              <div style="margin-top:6px;font-size:10.5px;color:{T['text_muted']};
+                  font-family:'JetBrains Mono',monospace">{caption}</div>
             </div>
             """, unsafe_allow_html=True)
 
@@ -1030,82 +1069,141 @@ with tab2:
             f'<div class="chart-section"><div class="sec-head">AI-Powered Customer Intelligence Explorer</div>',
             unsafe_allow_html=True)
             
-        col_sel, col_s1, col_s2, col_s3 = st.columns([2, 1, 1, 1])
+        seg_order = df_rfm["Segment"].value_counts()
+        col_sel, col_s1, col_s2, col_s3, col_s4 = st.columns([2, 1, 1, 1, 1])
         with col_sel:
-            selected_seg = st.selectbox("seg", df_rfm["Segment"].unique(), label_visibility="collapsed")
-            
+            seg_labels = {f"{s}  ·  {n:,} customers": s for s, n in seg_order.items()}
+            selected_seg = seg_labels[st.selectbox("Segment", list(seg_labels))]
+
         seg_df = df_rfm[df_rfm["Segment"] == selected_seg]
         seg_color = SEG_COLORS.get(selected_seg, T["accent"])
 
         seg_ai_df = pd.merge(seg_df, df_recs, on='customer_unique_id', how='left')
-        
+        scored = seg_ai_df["churn_risk_probability"].dropna()
+        n_unscored = len(seg_ai_df) - len(scored)
+        n_high = (seg_ai_df["Risk Tier"] == "High").sum()
+
+        def stat_tile(label, value, color, sub=""):
+            sub_html = (f'<div style="font-size:10px;color:{T["text_muted"]};margin-top:3px">{sub}</div>'
+                        if sub else "")
+            st.markdown(f"""
+            <div style="background:{T['bg_card2']};border:1px solid {T['border']};border-radius:8px;padding:12px 14px;min-height:78px">
+              <div style="font-size:9px;text-transform:uppercase;letter-spacing:1px;color:{T['text_faint']};margin-bottom:4px">{label}</div>
+              <div style="font-family:'JetBrains Mono',monospace;font-size:18px;font-weight:700;color:{color}">{value}</div>
+              {sub_html}
+            </div>""", unsafe_allow_html=True)
+
         with col_s1:
-            st.markdown(f"""
-            <div style="background:{T['bg_card2']};border:1px solid {T['border']};border-radius:8px;padding:12px 14px">
-              <div style="font-size:9px;text-transform:uppercase;letter-spacing:1px;color:{T['text_faint']};margin-bottom:4px">CUSTOMERS</div>
-              <div style="font-family:'JetBrains Mono',monospace;font-size:18px;font-weight:700;color:{seg_color}">{len(seg_ai_df):,}</div>
-            </div>""", unsafe_allow_html=True)
+            stat_tile("Customers", f"{len(seg_ai_df):,}", seg_color)
         with col_s2:
-            avg_churn_seg = seg_ai_df['churn_risk_probability'].mean() if 'churn_risk_probability' in seg_ai_df.columns else 0.35
-            st.markdown(f"""
-            <div style="background:{T['bg_card2']};border:1px solid {T['border']};border-radius:8px;padding:12px 14px">
-              <div style="font-size:9px;text-transform:uppercase;letter-spacing:1px;color:{T['text_faint']};margin-bottom:4px">AVG CHURN RISK</div>
-              <div style="font-family:'JetBrains Mono',monospace;font-size:18px;font-weight:700;color:{'#f87171' if avg_churn_seg > 0.5 else '#5eead4'}">{avg_churn_seg:.1%}</div>
-            </div>""", unsafe_allow_html=True)
+            if scored.empty:
+                stat_tile("Avg churn prob.", "N/A", T["text_muted"], "no scored customers")
+            else:
+                stat_tile("Avg churn prob.", f"{scored.mean():.1%}", T["text_primary"],
+                          f"{len(scored):,} scored")
         with col_s3:
-            st.markdown(f"""
-            <div style="background:{T['bg_card2']};border:1px solid {T['border']};border-radius:8px;padding:12px 14px">
-              <div style="font-size:9px;text-transform:uppercase;letter-spacing:1px;color:{T['text_faint']};margin-bottom:4px">AVG MONETARY</div>
-              <div style="font-family:'JetBrains Mono',monospace;font-size:18px;font-weight:700;color:{seg_color}">${seg_ai_df['monetary'].mean():,.0f}</div>
-            </div>""", unsafe_allow_html=True)
+            high_share = n_high / len(scored) if len(scored) else 0
+            stat_tile("High risk", f"{n_high:,}", RISK_COLORS["High"],
+                      f"{high_share:.0%} of scored · top 20%")
+        with col_s4:
+            stat_tile("Avg monetary", f"${seg_ai_df['monetary'].mean():,.0f}", seg_color)
 
-        st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
-
-        col_g1, col_g2 = st.columns([2, 3])
-        
-        with col_g1:
-            if 'churn_risk_probability' in seg_ai_df.columns:
-                fig_churn_hist = px.histogram(
-                    seg_ai_df, x="churn_risk_probability", nbins=15,
-                    color_discrete_sequence=[seg_color]
-                )
-                fig_churn_hist.update_layout(xaxis_tickformat=".0%", showlegend=False, xaxis_title=None, yaxis_title="Cust Count")
-                chart_card(" Churn Risk Score Distribution", fig_churn_hist, height=190)
-            else:
-                st.write("Missing Churn Data")
-
-        with col_g2:
-            if 'ai_recommendations' in seg_ai_df.columns:
-                all_recs = seg_ai_df['ai_recommendations'].dropna().str.split(', ').explode()
-                df_top_recs = all_recs.value_counts().reset_index().head(5)
-                df_top_recs.columns = ['Product Category', 'AI Count']
-                
-                fig_rec_bar = px.bar(
-                    df_top_recs, x="AI Count", y="Product Category", orientation="h",
-                    color="AI Count", color_continuous_scale=BAR_SCALE
-                )
-                fig_rec_bar.update_layout(coloraxis_showscale=False, yaxis_title=None, xaxis_title=None)
-                chart_card(" Top 5 AI Next-Purchase Recommendations", fig_rec_bar, height=190)
-            else:
-                st.write("Missing Recommendation Data")
+        if n_unscored:
+            st.caption(
+                f"ℹ️ {n_unscored:,} khách trong segment này chưa có churn score — họ chỉ có đơn chưa giao "
+                f"(shipped/canceled/…), mà model churn chỉ train trên đơn *delivered*. Hiển thị là **Not scored**.")
 
         st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
-        
-        if 'churn_risk_probability' in seg_ai_df.columns:
-            seg_ai_df['Churn Risk'] = seg_ai_df['churn_risk_probability'].apply(lambda x: f"{x:.1%}")
-        else:
-            seg_ai_df['Churn Risk'] = "30.0%"
-            
-        st.dataframe(
-            seg_ai_df[["customer_unique_id", "RFM_Score", "Churn Risk", "ai_recommendations"]]
-            .rename(columns={"ai_recommendations": "AI Personalized Recommendations"})
-            .sort_values("Churn Risk", ascending=False)
-            .head(30)
-            .reset_index(drop=True),
-            use_container_width=True, hide_index=True,
-        )
-        st.markdown("</div>", unsafe_allow_html=True)
 
+        col_g1, col_g2 = st.columns([2, 3])
+
+        with col_g1:
+            tier_order = ["High", "Medium", "Low", "Not scored"]
+            df_tiers = (seg_ai_df["Risk Tier"].value_counts()
+                        .reindex(tier_order, fill_value=0).reset_index())
+            df_tiers.columns = ["Risk Tier", "Customers"]
+            df_tiers = df_tiers[df_tiers["Customers"] > 0]
+            fig_tier = go.Figure(go.Bar(
+                x=df_tiers["Customers"], y=df_tiers["Risk Tier"], orientation="h",
+                marker_color=[RISK_COLORS[t] for t in df_tiers["Risk Tier"]], marker_line_width=0,
+                text=df_tiers["Customers"].apply(lambda x: f"{x:,}"), textposition="outside",
+                hovertemplate="<b>%{y}</b><br>%{x:,} customers<extra></extra>",
+            ))
+            chart_card("Churn Risk Tiers (vs. all customers)", fig_tier, height=200,
+                       extra_layout=dict(xaxis=dict(showgrid=False, showticklabels=False),
+                                         yaxis=dict(autorange="reversed"), bargap=0.35,
+                                         xaxis_title=None, yaxis_title=None))
+
+        with col_g2:
+            all_recs = seg_ai_df['ai_recommendations'].dropna().str.split(', ').explode()
+            if all_recs.empty:
+                st.info("No AI recommendations for this segment.")
+            else:
+                df_top_recs = all_recs.value_counts().reset_index().head(5)
+                df_top_recs.columns = ['Product Category', 'AI Count']
+                fig_rec_bar = px.bar(
+                    df_top_recs.sort_values("AI Count"), x="AI Count", y="Product Category",
+                    orientation="h", color="AI Count", color_continuous_scale=BAR_SCALE
+                )
+                fig_rec_bar.update_traces(marker_line_width=0,
+                                          hovertemplate="<b>%{y}</b><br>%{x:,} customers<extra></extra>")
+                fig_rec_bar.update_layout(coloraxis_showscale=False, yaxis_title=None, xaxis_title=None)
+                chart_card("Top 5 AI Next-Purchase Recommendations", fig_rec_bar, height=200)
+
+        # ── Customer table controls ───────────
+        f1, f2, f3, f4 = st.columns([2, 2, 1.4, 1])
+        with f1:
+            search_id = st.text_input("Search customer ID", placeholder="e.g. 0db490bc…")
+        with f2:
+            tier_filter = st.multiselect("Risk tier", tier_order, default=[],
+                                         placeholder="All tiers")
+        with f3:
+            sort_by = st.selectbox("Sort by", ["Churn risk ↓", "Monetary ↓", "Recency ↑", "Frequency ↓"])
+        with f4:
+            n_rows = st.selectbox("Rows", [25, 50, 100, 500], index=1)
+
+        view = seg_ai_df
+        if search_id:
+            view = view[view["customer_unique_id"].str.contains(search_id.strip(), case=False, regex=False)]
+        if tier_filter:
+            view = view[view["Risk Tier"].isin(tier_filter)]
+        sort_col, ascending = {
+            "Churn risk ↓": ("churn_risk_probability", False),
+            "Monetary ↓":   ("monetary", False),
+            "Recency ↑":    ("recency", True),
+            "Frequency ↓":  ("frequency", False),
+        }[sort_by]
+        # Sort numerically; unscored customers always go to the bottom
+        view = view.sort_values(sort_col, ascending=ascending, na_position="last")
+
+        table = view[["customer_unique_id", "RFM_Score", "Risk Tier", "churn_risk_probability",
+                      "recency", "frequency", "monetary", "ai_recommendations"]]
+        st.dataframe(
+            table.head(n_rows),
+            width="stretch", hide_index=True, height=min(38 + 35 * min(len(table), n_rows), 460),
+            column_config={
+                "customer_unique_id": st.column_config.TextColumn("Customer ID", width="medium"),
+                "RFM_Score": st.column_config.TextColumn("RFM", width="small"),
+                "Risk Tier": st.column_config.TextColumn("Risk tier", width="small"),
+                "churn_risk_probability": st.column_config.ProgressColumn(
+                    "Churn probability", format="percent", min_value=0.0, max_value=1.0,
+                    help="Model probability of no purchase in the next 180 days. Empty = not scored."),
+                "recency": st.column_config.NumberColumn("Recency", format="%d d"),
+                "frequency": st.column_config.NumberColumn("Orders", format="%d"),
+                "monetary": st.column_config.NumberColumn("Monetary", format="$%.2f"),
+                "ai_recommendations": st.column_config.TextColumn("AI personalized recommendations",
+                                                                  width="large"),
+            },
+        )
+        d1, d2 = st.columns([4, 1])
+        with d1:
+            st.caption(f"Showing {min(len(table), n_rows):,} of {len(table):,} matching customers")
+        with d2:
+            st.download_button(
+                "⬇ Download CSV", table.to_csv(index=False).encode("utf-8"),
+                file_name=f"customers_{selected_seg.replace(' ', '_').lower()}.csv",
+                mime="text/csv", width="stretch")
+        st.markdown("</div>", unsafe_allow_html=True)
 
 # ──────────────────────────────────────────
 # TAB 3 — COHORT RETENTION
