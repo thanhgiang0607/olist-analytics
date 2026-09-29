@@ -1,5 +1,6 @@
 import os
-RAW_DATA_DIR = "data/raw"
+
+from config import RAW_DATA_DIR
 os.makedirs(RAW_DATA_DIR, exist_ok=True)
 
 print('Downloading data...')

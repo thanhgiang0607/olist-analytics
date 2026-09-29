@@ -1,2 +1,4 @@
 dev.duckdb
 venv/
+__pycache__/
+.omc/

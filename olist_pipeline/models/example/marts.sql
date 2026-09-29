@@ -6,7 +6,7 @@ order_payments_aggregated AS (
     SELECT 
         order_id,
         SUM(payment_value) as total_amount_paid
-    FROM read_csv_auto('data/raw/olist_order_payments_dataset.csv')
+    FROM read_csv_auto({{ raw_path('olist_order_payments_dataset.csv') }})
     GROUP BY order_id
 ),
 

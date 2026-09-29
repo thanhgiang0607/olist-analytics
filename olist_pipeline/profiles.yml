@@ -2,5 +2,6 @@ olist_pipeline:
   outputs:
     dev:
       type: duckdb
-      path: /Users/ciaranguyen/Documents/ecom_project/dev.duckdb
+      # Relative to the directory dbt runs from (the repo root); override with DUCKDB_PATH
+      path: "{{ env_var('DUCKDB_PATH', 'dev.duckdb') }}"
   target: dev

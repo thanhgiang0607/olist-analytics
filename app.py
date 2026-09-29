@@ -1,8 +1,9 @@
 import streamlit as st
-import duckdb
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+
+from config import PROJECT_ROOT, raw_csv
 
 # ══════════════════════════════════════════
 # 1. PAGE CONFIG
@@ -552,7 +553,6 @@ def chart_card(title: str, fig, height=300, margin=None, extra_layout=None):
 # ══════════════════════════════════════════
 # 5. DATA & ANALYTICS HELPERS
 # ══════════════════════════════════════════
-DB_PATH = "/Users/ciaranguyen/Documents/ecom_project/dev.duckdb"
 
 @st.cache_data
 def get_rfm_data(df, reference_date):
@@ -616,12 +616,12 @@ def get_cohort_data(df):
 
 @st.cache_data
 def load_data():
-    marts  = pd.read_csv("marts_data.csv")
-    rfm    = pd.read_csv("rfm_data.csv")
-    recs   = pd.read_csv("recommendations_data.csv")
+    marts  = pd.read_csv(PROJECT_ROOT / "marts_data.csv")
+    rfm    = pd.read_csv(PROJECT_ROOT / "rfm_data.csv")
+    recs   = pd.read_csv(PROJECT_ROOT / "recommendations_data.csv")
     
     # Important: Join customer_unique_id for dynamic RFM/Cohort
-    customers = pd.read_csv("data/raw/olist_customers_dataset.csv")
+    customers = pd.read_csv(raw_csv("olist_customers_dataset.csv"))
     marts = marts.merge(customers[["customer_id", "customer_unique_id", "customer_state"]], on="customer_id", how="left")
     
     marts["purchase_at"] = pd.to_datetime(marts["purchase_at"])

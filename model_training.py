@@ -9,17 +9,18 @@ from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.decomposition import TruncatedSVD
 from sklearn.metrics import accuracy_score, classification_report, roc_auc_score, roc_curve
 
+from config import DUCKDB_PATH, PROJECT_ROOT, raw_csv
+
 plt.style.use('seaborn-v0_8-whitegrid' if 'seaborn-v0_8-whitegrid' in plt.style.available else 'default')
 plt.rcParams.update({'font.size': 10, 'figure.titlesize': 12})
 
-output_dir = "ai_visualizations"
+output_dir = PROJECT_ROOT / "ai_visualizations"
 os.makedirs(output_dir, exist_ok=True)
 
 print("🔌 [DATABASE] Connecting to local DuckDB storage...")
-DB_PATH = os.environ.get("DUCKDB_PATH", "/Users/ciaranguyen/Documents/ecom_project/dev.duckdb")
 CHURN_WINDOW_DAYS = 180
 
-con = duckdb.connect(DB_PATH)
+con = duckdb.connect(str(DUCKDB_PATH), read_only=True)
 print("✅ [DATABASE] Connection established successfully.\n")
 
 print("" + "="*70)
@@ -36,14 +37,14 @@ print(f"   ↳ Loaded {len(df_rfm):,} customer profiles from 'analytics_rfm'.")
 # Churn is defined on future behaviour to avoid label leakage: RFM features are
 # computed as of a cutoff date, and a customer is churned if they place no order
 # in the CHURN_WINDOW_DAYS that follow it.
-df_orders = con.execute("""
+df_orders = con.execute(f"""
     SELECT
         c.customer_unique_id,
         m.order_id,
         MIN(m.purchase_at) as purchase_at,
         SUM(m.total_amount_paid) as amount
     FROM main.marts m
-    JOIN read_csv_auto('data/raw/olist_customers_dataset.csv') c ON m.customer_id = c.customer_id
+    JOIN read_csv_auto('{raw_csv("olist_customers_dataset.csv")}') c ON m.customer_id = c.customer_id
     WHERE m.order_status = 'delivered'
     GROUP BY ALL
 """).df()
@@ -119,7 +120,7 @@ df_rfm = df_rfm.drop(columns=['is_churned', 'churn_risk_probability'], errors='i
 avg_churn_risk = df_rfm['churn_risk_probability'].mean()
 print(f"   ↳ Average Churn Risk Across Customer Base: {avg_churn_risk:.1%}")
 print("   ↳ Exporting predictive outcomes to 'rfm_data.csv'...")
-df_rfm.to_csv("rfm_data.csv", index=False)
+df_rfm.to_csv(PROJECT_ROOT / "rfm_data.csv", index=False)
 print("✅ [MODULE 1] Finished Churn Prediction Pipeline.\n")
 
 print("-" * 50)
@@ -128,14 +129,14 @@ print("-" * 50)
 # MODULE 2: RECOMMENDATION ENGINE 
 # =========================================================================
 print("🛍️ [MODULE 2] Computing Collaborative Filtering Recommendations...")
-df_marts = con.execute("""
+df_marts = con.execute(f"""
     SELECT 
         c.customer_unique_id, 
         m.product_category, 
         COUNT(m.order_id) as purchase_count 
     FROM main.marts m
-    JOIN read_csv_auto('data/raw/olist_orders_dataset.csv') o ON m.order_id = o.order_id
-    JOIN read_csv_auto('data/raw/olist_customers_dataset.csv') c ON o.customer_id = c.customer_id
+    JOIN read_csv_auto('{raw_csv("olist_orders_dataset.csv")}') o ON m.order_id = o.order_id
+    JOIN read_csv_auto('{raw_csv("olist_customers_dataset.csv")}') c ON o.customer_id = c.customer_id
     WHERE m.product_category IS NOT NULL
     GROUP BY ALL
 """).df()
@@ -178,7 +179,7 @@ plt.close()
 print(f"   📸 [SAVED] Plot exported to '{output_dir}/module2_recommendations_distribution.png'")
 
 print("   ↳ Exporting recommendation matrix to 'recommendations_data.csv'...")
-df_recs.to_csv("recommendations_data.csv", index=False)
+df_recs.to_csv(PROJECT_ROOT / "recommendations_data.csv", index=False)
 print("✅ [MODULE 2] Finished Product Recommendation Pipeline.\n")
 
 print("-" * 50)
@@ -187,7 +188,7 @@ print("-" * 50)
 # MODULE 3: NLP SENTIMENT ANALYSIS 
 # =========================================================================
 print("💬 [MODULE 3] Running NLP Sentiment Rule-Based Analysis...")
-df_marts_raw = con.execute("""
+df_marts_raw = con.execute(f"""
     SELECT 
         m.*, 
         COALESCE(r.review_score, 5) as review_score
@@ -195,7 +196,7 @@ df_marts_raw = con.execute("""
     LEFT JOIN (
         -- Some orders have several reviews; keep the latest so the join does not duplicate rows
         SELECT order_id, review_score
-        FROM read_csv_auto('data/raw/olist_order_reviews_dataset.csv')
+        FROM read_csv_auto('{raw_csv("olist_order_reviews_dataset.csv")}')
         QUALIFY ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY review_answer_timestamp DESC) = 1
     ) r ON m.order_id = r.order_id
 """).df()
@@ -228,7 +229,7 @@ plt.close()
 print(f"   📸 [SAVED] Plot exported to '{output_dir}/module3_sentiment_analysis.png'")
 
 print("   ↳ Overwriting analytical marts to 'marts_data.csv'...")
-df_marts_raw.to_csv("marts_data.csv", index=False)
+df_marts_raw.to_csv(PROJECT_ROOT / "marts_data.csv", index=False)
 print("✅ [MODULE 3] Finished NLP Sentiment Pipeline.\n")
 
 con.close()

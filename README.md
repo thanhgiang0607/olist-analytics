@@ -75,9 +75,11 @@ ecom_project/
 ├── olist_pipeline/         # dbt Transformation Layer
 │   ├── models/
 │   │   ├── staging.sql     # Data cleaning & type casting
-│   │   └── marts.sql       # Business logic & KPIs (Revenue, Logistics)
+│   │   ├── marts.sql       # Business logic & KPIs (Revenue, Logistics)
+│   │   └── analytics_rfm.sql # Customer RFM scores & segments
 │   └── dbt_project.yml
 ├── ai_visualizations/      # ML Model evaluation plots (PNG)
+├── config.py               # Shared paths (DUCKDB_PATH, OLIST_RAW_DIR)
 ├── app.py                  # Streamlit Dashboard (UI/UX Layer)
 ├── model_training.py       # AI/ML Pipeline (Churn, Recs, NLP)
 ├── load_data.py            # Data Acquisition (Kaggle API)
@@ -149,11 +151,13 @@ python load_data.py
 ```
 
 ### 3. Data Transformation (dbt)
+Run from the repo root — this builds `dev.duckdb` (staging, marts, analytics_rfm) next to the code:
 ```bash
-cd olist_pipeline
-dbt run
-cd ..
+dbt run --project-dir olist_pipeline --profiles-dir olist_pipeline
 ```
+Paths default to the repo (`dev.duckdb`, `data/raw/`). To use other locations, set `DUCKDB_PATH` and/or `OLIST_RAW_DIR` — dbt, `model_training.py`, the notebooks and the app all read them via `config.py`.
+
+> dbt-core currently fails on Python 3.14 (`mashumaro` error); use Python 3.12/3.13 for the venv.
 
 ### 4. AI Model Training
 ```bash
